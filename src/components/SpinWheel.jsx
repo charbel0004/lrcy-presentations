@@ -107,7 +107,7 @@ export default function SpinWheel({ labels = [], rotationRad = 0 }) {
 
       ctx.rotate(mid);
       ctx.translate(radius * 0.67, 0);
-      ctx.rotate(-Math.PI / 2); // vertical/upright
+      ctx.rotate(-Math.PI ); // vertical/upright
 
       const raw = String(labels[i] || "");
       const lines = wrapLines(raw, 18);

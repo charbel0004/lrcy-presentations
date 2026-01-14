@@ -3,6 +3,13 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { setSession } from "../lib/auth";
 
+function roleHome(role) {
+  if (role === "admin") return "/admin";
+  if (role === "evaluator") return "/evaluator";
+  if (role === "presenter") return "/spin";
+  return "/login";
+}
+
 export default function Login() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -34,8 +41,11 @@ export default function Login() {
         body: JSON.stringify({ username: u, password }),
       });
 
+      // Persist token + user
       setSession(res.token, res.user);
-      navigate(res.user.role === "admin" ? "/admin" : "/spin");
+
+      // Redirect based on role (admin/evaluator/presenter)
+      navigate(roleHome(res?.user?.role), { replace: true });
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -64,12 +74,8 @@ export default function Login() {
                 <span className="text-red-400 text-xl font-bold">LRC</span>
               </div>
 
-              <h1 className="text-2xl font-semibold tracking-tight">
-                LRCY Presentations
-              </h1>
-              <p className="text-sm text-neutral-400 mt-1">
-                Sign in to get your randomly assigned topic.
-              </p>
+              <h1 className="text-2xl font-semibold tracking-tight">LRCY Presentations</h1>
+              <p className="text-sm text-neutral-400 mt-1">Sign in to get your randomly assigned topic.</p>
             </div>
 
             {/* Form */}
@@ -130,9 +136,7 @@ export default function Login() {
                 {loading ? "Signing in..." : "Login"}
               </button>
 
-              <div className="text-xs text-neutral-400 text-center pt-1">
-                No account? Ask the admin to create one.
-              </div>
+              <div className="text-xs text-neutral-400 text-center pt-1">No account? Ask the admin to create one.</div>
             </div>
 
             {/* Footer hint */}
