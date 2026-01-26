@@ -73,7 +73,6 @@ const EvaluationSchema = new mongoose.Schema(
     presenterId: { type: mongoose.Schema.Types.ObjectId, required: true },
     evaluatorId: { type: mongoose.Schema.Types.ObjectId, required: true },
 
-    // snapshot of criteria used at time of evaluation (safe if criteria changes later)
     criteria: [
       {
         criterionId: { type: mongoose.Schema.Types.ObjectId, required: true },
@@ -82,6 +81,9 @@ const EvaluationSchema = new mongoose.Schema(
         score: { type: Number, required: true, min: 1, max: 10 },
       },
     ],
+
+    // NEW: evaluator comment (optional)
+    comment: { type: String, default: "", trim: true, maxlength: 1500 },
 
     totalScore: { type: Number, required: true, min: 0 },
     createdAt: { type: Date, required: true, default: Date.now },
@@ -577,7 +579,7 @@ app.get("/api/evaluator/evaluation-criteria", authGuard, requireRole("evaluator"
 app.post("/api/evaluator/evaluations", authGuard, requireRole("evaluator"), async (req, res) => {
   try {
     const evaluatorId = new mongoose.Types.ObjectId(req.user.sub);
-    const { presenterId, scores } = req.body || {};
+    const { presenterId, scores, comment } = req.body || {};
 
     if (!mongoose.isValidObjectId(presenterId)) {
       return res.status(400).json({ message: "Invalid presenterId." });
@@ -585,6 +587,15 @@ app.post("/api/evaluator/evaluations", authGuard, requireRole("evaluator"), asyn
 
     if (!Array.isArray(scores) || scores.length === 0) {
       return res.status(400).json({ message: "scores array is required." });
+    }
+
+    // NEW: comment validation (optional)
+    let cm = "";
+    if (comment !== undefined && comment !== null) {
+      cm = String(comment).trim();
+      if (cm.length > 1500) {
+        return res.status(400).json({ message: "comment max length is 1500 characters." });
+      }
     }
 
     const presenter = await User.findOne({ _id: presenterId, role: "presenter", hasSpun: true }).select("_id").lean();
@@ -633,6 +644,7 @@ app.post("/api/evaluator/evaluations", authGuard, requireRole("evaluator"), asyn
       presenterId: new mongoose.Types.ObjectId(presenterId),
       evaluatorId,
       criteria: rows.sort((a, b) => (a.order ?? 999999) - (b.order ?? 999999)),
+      comment: cm, // NEW: save comment
       totalScore,
       createdAt: new Date(),
     });
@@ -644,6 +656,151 @@ app.post("/api/evaluator/evaluations", authGuard, requireRole("evaluator"), asyn
     }
     console.error("Submit evaluation failed:", e);
     return res.status(500).json({ message: "Failed to submit evaluation." });
+  }
+});
+
+
+
+
+
+app.get("/api/admin/presenters-reports", authGuard, requireRole("admin"), async (req, res) => {
+  try {
+    const usersCol = mongoose.connection.collection("users");
+
+    const pipeline = [
+      // 1) Only presenters who have spun
+      {
+        $match: {
+          role: "presenter",
+          hasSpun: true,
+        },
+      },
+
+      // 2) Join topic
+      {
+        $lookup: {
+          from: "topics",
+          localField: "assignedTopicId",
+          foreignField: "_id",
+          as: "topic",
+        },
+      },
+      { $unwind: { path: "$topic", preserveNullAndEmptyArrays: true } },
+
+      // 3) Join evaluations for that presenter
+      {
+        $lookup: {
+          from: "evaluations",
+          let: { pid: "$_id" },
+          pipeline: [
+            // Match evaluations for this presenter
+            { $match: { $expr: { $eq: ["$presenterId", "$$pid"] } } },
+
+            // 3.a) Join evaluator user to get evaluator name
+            {
+              $lookup: {
+                from: "users",
+                localField: "evaluatorId",
+                foreignField: "_id",
+                as: "evaluator",
+              },
+            },
+            { $unwind: { path: "$evaluator", preserveNullAndEmptyArrays: true } },
+
+            // 3.b) Shape each evaluation row (✅ INCLUDE comment)
+            {
+              $project: {
+                _id: 1,
+                evaluatorId: 1,
+                evaluatorName: "$evaluator.fullName",
+                evaluatorUsername: "$evaluator.username",
+                totalScore: 1,
+                createdAt: 1,
+
+                // ✅ Fix: return comment so UI can show it
+                comment: {
+                  $let: {
+                    vars: {
+                      c1: { $ifNull: ["$comment", ""] },   // current field
+                      c2: { $ifNull: ["$comments", ""] },  // fallback if old docs used "comments"
+                      c3: { $ifNull: ["$feedback", ""] },  // fallback if old docs used "feedback"
+                    },
+                    in: {
+                      $cond: [
+                        { $gt: [{ $strLenCP: "$$c1" }, 0] },
+                        "$$c1",
+                        {
+                          $cond: [
+                            { $gt: [{ $strLenCP: "$$c2" }, 0] },
+                            "$$c2",
+                            "$$c3",
+                          ],
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+
+            { $sort: { createdAt: 1 } },
+          ],
+          as: "evaluations",
+        },
+      },
+
+      // 4) Compute metrics
+      {
+        $addFields: {
+          evalCount: { $size: "$evaluations" },
+          avgTotalScore: {
+            $cond: [
+              { $gt: [{ $size: "$evaluations" }, 0] },
+              { $avg: "$evaluations.totalScore" },
+              null,
+            ],
+          },
+          sumTotalScore: {
+            $cond: [
+              { $gt: [{ $size: "$evaluations" }, 0] },
+              { $sum: "$evaluations.totalScore" },
+              0,
+            ],
+          },
+        },
+      },
+
+      // 5) Final projection
+      {
+        $project: {
+          _id: 1,
+          fullName: 1,
+          username: 1,
+          assignedAt: 1,
+
+          topic: {
+            _id: "$topic._id",
+            title: "$topic.title",
+            description: "$topic.description",
+          },
+
+          evalCount: 1,
+          avgTotalScore: 1,
+          sumTotalScore: 1,
+          evaluations: 1,
+        },
+      },
+
+      // 6) Sort presenters
+      { $sort: { assignedAt: 1, createdAt: 1 } },
+    ];
+
+    const rows = await usersCol.aggregate(pipeline).toArray();
+
+    return res.json({ presenters: rows });
+  } catch (e) {
+    console.error("Admin presenters reports failed:", e);
+    return res.status(500).json({ message: "Failed to load presenters report." });
   }
 });
 
